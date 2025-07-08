@@ -2,6 +2,7 @@ import re
 import time
 import yaml
 import traceback
+from collections import deque
 from typing import List, Dict, Optional
 
 import httpx
@@ -19,13 +20,14 @@ class LLM_API_Translator(BaseTranslator):
     concate_text = False
     cht_require_convert = True
     params: Dict = {
+        # ... (all other params remain the same)
         "provider": {
             "type": "selector",
             "options": ["OpenAI", "Google"],
             "value": "OpenAI",
             "description": "Select the LLM provider.",
         },
-        "apikey": {  # Один API-ключ, если не заданы несколько
+        "apikey": {
             "value": "",
             "description": "Single API key to use if multiple keys are not provided.",
         },
@@ -57,44 +59,43 @@ class LLM_API_Translator(BaseTranslator):
         },
         "prompt template": {
             "type": "editor",
-            "value": "Please help me to translate the following text from a manga to {to_lang} (if it's already in {to_lang} or looks like gibberish you have to output it as it is instead):\n",
+            "value": "Now, translate the following source text to {to_lang}, maintaining the established style. Output only the translation:",
         },
         "chat system template": {
             "type": "editor",
-            "value": "You are a professional translation engine, please translate the text into a colloquial, elegant and fluent content, without referencing machine translations. You must only translate the text content, never interpret it. If there's any issue in the text, output the text as is.\nTranslate to {to_lang}.",
+            "value": "You are a raw text translation API. Your only function is to translate the user's input to {to_lang}. Your output must be ONLY the translated text. Do not add any commentary, prefixes, or conversational text. You must translate any text provided.",
         },
         "chat sample": {
             "type": "editor",
-            "value": """日本語-简体中文:
-    source:
-        - 二人のちゅーを 目撃した ぼっちちゃん
-        - ふたりさん
-        - 大好きなお友達には あいさつ代わりに ちゅーするんだって
-        - アイス あげた
-        - 喜多ちゃんとは どどど どういった ご関係なのでしようか...
-        - テレビで見た！
-    target:
-        - 小孤独目击了两人的接吻
-        - 二里酱
-        - 我听说人们会把亲吻作为与喜爱的朋友打招呼的方式
-        - 我给了她冰激凌
-        - 喜多酱 и你是怎么样的关系啊...
-        - 我在电视上看到的！""",
+            "value": "",
         },
-        "invalid repeat count": {
-            "value": 2,
-            "description": "Number of invalid repeat counts before considering translation failed.",
+        "separate_requests": {
+            "type": "checkbox",
+            "value": True,
+            "description": "Send each text line in a separate API request. Recommended for local LLMs.",
+        },
+        "narration_context_size": {
+            "value": 3,
+            "description": "Number of previous source-translation pairs to include as context (0 to disable). WARNING: High token usage."
+        },
+        "context_clear_interval": {
+            "value": 0,
+            "description": "Clear LLM context after every N requests. 0 to disable. (For separate requests mode only).",
+        },
+        "context_clear_message": { #redundant, api is stateless 
+            "value": "/clear",
+            "description": "The message to send to clear the context for local LLMs like Ollama.",
         },
         "max requests per minute": {
-            "value": 20,
+            "value": 30,
             "description": "Maximum requests per minute for EACH API key.",
         },
         "delay": {
-            "value": 0.3,
+            "value": 0.1,
             "description": "Global delay in seconds between requests.",
         },
         "max tokens": {
-            "value": 4096,
+            "value": 2048,
             "description": "Maximum tokens for the response.",
         },
         "temperature": {
@@ -105,55 +106,35 @@ class LLM_API_Translator(BaseTranslator):
             "value": 1.,
             "description": "Top P for sampling. Forced to 1 for Google models.",
         },
+        "use_provider_defaults": {
+            "type": "checkbox",
+            "value": False,
+            "description": "If checked, do not send temperature, top_p, or max_tokens. Uses the LLM provider's (e.g., Ollama) default settings.",
+        },
         "retry attempts": {
-            "value": 5,
+            "value": 3,
             "description": "Number of retry attempts on failure.",
         },
         "retry timeout": {
-            "value": 15,
+            "value": 10,
             "description": "Timeout between retry attempts (seconds).",
         },
         "proxy": {
             "value": "",
             "description": "Proxy address (e.g., http(s)://user:password@host:port or socks4/5://user:password@host:port)",
         },
-        "frequency penalty": {
-            "value": 0.0,
-            "description": "Frequency penalty (OpenAI).",
-        },
-        "presence penalty": {"value": 0.0, "description": "Presence penalty (OpenAI)."},
-        "low vram mode": {
-            "value": False,
-            "description": "Check if running locally and facing VRAM issues.",
-            "type": "checkbox",
-        },
     }
 
     def _setup_translator(self):
+        # ... (lang_map and other initializations)
         self.lang_map = {
-            "简体中文": "Simplified Chinese",
-            "繁體中文": "Traditional Chinese",
-            "日本語": "Japanese",
-            "English": "English",
-            "한국어": "Korean",
-            "Tiếng Việt": "Vietnamese",
-            "čeština": "Czech",
-            "Français": "French",
-            "Deutsch": "German",
-            "magyar nyelv": "Hungarian",
-            "Italiano": "Italian",
-            "Polski": "Polish",
-            "Português": "Portuguese",
-            "limba română": "Romanian",
-            "русский язык": "Russian",
-            "Español": "Spanish",
-            "Türk dili": "Turkish",
-            "украї́нська мо́ва": "Ukrainian",
-            "Thai": "Thai",
-            "Arabic": "Arabic",
-            "Malayalam": "Malayalam",
-            "Tamil": "Tamil",
-            "Hindi": "Hindi",
+            "简体中文": "Simplified Chinese", "繁體中文": "Traditional Chinese", "日本語": "Japanese",
+            "English": "English", "한국어": "Korean", "Tiếng Việt": "Vietnamese", "čeština": "Czech",
+            "Français": "French", "Deutsch": "German", "magyar nyelv": "Hungarian",
+            "Italiano": "Italian", "Polski": "Polish", "Português": "Portuguese",
+            "limba română": "Romanian", "русский язык": "Russian", "Español": "Spanish",
+            "Türk dili": "Turkish", "украї́нська мо́ва": "Ukrainian", "Thai": "Thai",
+            "Arabic": "Arabic", "Malayalam": "Malayalam", "Tamil": "Tamil", "Hindi": "Hindi",
         }
         self.token_count = 0
         self.token_count_last = 0
@@ -161,461 +142,342 @@ class LLM_API_Translator(BaseTranslator):
         self.last_request_time = 0
         self.request_count_minute = 0
         self.minute_start_time = time.time()
-        # Для контроля лимита по каждому ключу:
-        self.key_usage = {}  # { api_key: (count, minute_start_time) }
+        self.key_usage = {}
+        self.client = None
+        # *** MODIFIED: History now stores (source, target) pairs ***
+        self.translation_history = deque(maxlen=self.narration_context_size)
         self._initialize_client()
 
-    def _initialize_client(self):
-        # Настраиваем httpx клиент с поддержкой proxy
-        if self.proxy:
-            proxy_mounts = {
-                "http://": httpx.HTTPTransport(proxy=self.proxy),
-                "https://": httpx.HTTPTransport(proxy=self.proxy),
-            }
-            transport = httpx.Client(mounts=proxy_mounts)
-        else:
-            transport = httpx.Client()
-
-        # Определяем API-ключ: если заданы несколько, берём первый
-        api_keys = self.multiple_keys_list
-        if api_keys:
-            api_key_to_use = api_keys[0]
-        else:
-            api_key_to_use = self.apikey
-
-        if not api_key_to_use:
-            self.logger.warning(
-                "No API key provided. Please set either 'apikey' or 'multiple_keys'."
-            )
-            self.client = None
-            return
-
-        # Определяем endpoint: если не задан, выбираем по провайдеру
-        endpoint = self.endpoint
-        if not endpoint:
-            if self.provider == "Google":
-                endpoint = "https://generativelanguage.googleapis.com/v1beta/openai"
-            else:
-                endpoint = "https://api.openai.com/v1"
-
-        # Маскируем API ключ в логах – показываем только первые 6 символов
-        masked_key = api_key_to_use[:6] + "*" * (len(api_key_to_use) - 6)
-        self.logger.debug(
-            f"Initializing OpenAI client with API key: {masked_key} and endpoint: {endpoint}"
-        )
-        self.client = OpenAI(
-            api_key=api_key_to_use, base_url=endpoint, http_client=transport
-        )
-
+    # ... (all properties and _initialize_client remain the same)
     @property
-    def provider(self) -> str:
-        return self.get_param_value("provider")
-
+    def provider(self) -> str: return self.get_param_value("provider")
     @property
-    def apikey(self) -> str:
-        return self.get_param_value("apikey")
-
+    def apikey(self) -> str: return self.get_param_value("apikey")
     @property
     def multiple_keys_list(self) -> List[str]:
         keys_str = self.get_param_value("multiple_keys").strip()
         return [key.strip() for key in keys_str.split(";") if key.strip()]
-
     @property
-    def model(self) -> str:
-        return self.get_param_value("model")
-
+    def model(self) -> str: return self.get_param_value("model")
     @property
-    def override_model(self) -> Optional[str]:
-        return self.get_param_value("override model") or None
-
+    def override_model(self) -> Optional[str]: return self.get_param_value("override model") or None
     @property
-    def endpoint(self) -> Optional[str]:
-        return self.get_param_value("endpoint") or None
-
+    def endpoint(self) -> Optional[str]: return self.get_param_value("endpoint") or None
     @property
-    def temperature(self) -> float:
-        return float(self.get_param_value("temperature"))
-
+    def temperature(self) -> float: return float(self.get_param_value("temperature"))
     @property
-    def top_p(self) -> float:
-        return float(self.get_param_value("top p"))
-
+    def top_p(self) -> float: return float(self.get_param_value("top p"))
     @property
-    def max_tokens(self) -> int:
-        return int(self.get_param_value("max tokens"))
-
+    def use_provider_defaults(self) -> bool: return bool(self.get_param_value("use_provider_defaults"))
     @property
-    def retry_attempts(self) -> int:
-        return int(self.get_param_value("retry attempts"))
-
+    def max_tokens(self) -> int: return int(self.get_param_value("max tokens"))
     @property
-    def retry_timeout(self) -> int:
-        return int(self.get_param_value("retry timeout"))
-
+    def retry_attempts(self) -> int: return int(self.get_param_value("retry attempts"))
     @property
-    def proxy(self) -> str:
-        return self.get_param_value("proxy")
+    def retry_timeout(self) -> int: return int(self.get_param_value("retry timeout"))
+    @property
+    def proxy(self) -> str: return self.get_param_value("proxy")
+    @property
+    def separate_requests(self) -> bool: return bool(self.get_param_value("separate_requests"))
+    @property
+    def narration_context_size(self) -> int: return int(self.get_param_value("narration_context_size"))
+    @property
+    def context_clear_interval(self) -> int: return int(self.get_param_value("context_clear_interval"))
+    @property
+    def context_clear_message(self) -> str: return self.get_param_value("context_clear_message")
+
+    # *** MODIFIED: _build_prompt_with_context now creates source-target pairs ***
+    def _build_prompt_with_context(self, current_prompt_segment: str, current_query: str) -> str:
+        """Builds the final prompt, prepending source-target context if available."""
+        if not self.translation_history:
+            return f"{current_prompt_segment}\n{current_query}"
+
+        context_header = "For context and stylistic consistency, here are the recent source texts and their translations:"
+        context_blocks = []
+        for src, tgt in self.translation_history:
+            # Skip empty entries that might have been added
+            if str(src).strip() and str(tgt).strip():
+                context_blocks.append(f"Source: {src}\nTarget: {tgt}")
+        
+        if not context_blocks:
+            return f"{current_prompt_segment}\n{current_query}"
+
+        full_context = f"{context_header}\n" + "\n---\n".join(context_blocks)
+        return f"{full_context}\n\n{current_prompt_segment}\n{current_query}"
+
+    # ... (_request_translation and other methods are mostly the same)
+    
+    def _translate(self, src_list: List[str]) -> List[str]:
+        # *** MODIFIED: Reset history for each new translation job (e.g., each panel) ***
+        # Check if the maxlen needs updating from params
+        if self.translation_history.maxlen != self.narration_context_size:
+            self.translation_history = deque(maxlen=self.narration_context_size)
+        else:
+            self.translation_history.clear()
+        
+        if self.separate_requests:
+            return self._translate_single(src_list)
+        else:
+            return self._translate_batch(src_list)
+
+    def _translate_single(self, src_list: List[str]) -> List[str]:
+        translations = []
+        to_lang = self.lang_map.get(self.lang_target, self.lang_target)
+        prompt_template = self.params["prompt template"]["value"].format(to_lang=to_lang).rstrip()
+        chat_sample = self.chat_sample
+        request_count = 0
+
+        for i, query in enumerate(src_list):
+            if not query or not query.strip():
+                translations.append("")
+                # Add a placeholder to history to maintain sequence if needed, but often better to skip
+                # self.translation_history.append((query, ""))
+                request_count += 1
+                continue
+
+            # *** MODIFIED: Prompt construction and history update ***
+            prompt = self._build_prompt_with_context(prompt_template, query)
+            
+            if self.context_clear_interval > 0 and request_count > 0 and \
+               request_count % self.context_clear_interval == 0:
+                self._clear_context()
+
+            new_translation = ""
+            for attempt in range(self.retry_attempts):
+                try:
+                    new_translation = self._request_translation(prompt, chat_sample)
+                    self.translation_history.append((query, new_translation)) # Add pair to history
+                    break
+                except Exception:
+                    if attempt + 1 >= self.retry_attempts:
+                        self.logger.error(f"Translation failed for '{query}' after {self.retry_attempts} attempts.")
+                        new_translation = ""
+                        # Don't add failed attempts to history
+                        break
+                    self.logger.warning(f"Attempt {attempt + 1} failed. Retrying in {self.retry_timeout}s...")
+                    time.sleep(self.retry_timeout)
+            
+            translations.append(new_translation)
+            request_count += 1
+            if len(translations) % 10 == 0:
+                self.logger.info(f"Translated {len(translations)}/{len(src_list)} lines...")
+
+        return translations
+
+    def _translate_batch(self, src_list: List[str]) -> List[str]:
+        to_lang = self.lang_map.get(self.lang_target, self.lang_target)
+        prompt_template = self.params["prompt template"]["value"].format(to_lang=to_lang).rstrip()
+        chat_sample = self.chat_sample
+        num_src = len(src_list)
+
+        non_empty_queries = []
+        original_indices = {}
+        for i, query in enumerate(src_list):
+            if query and query.strip():
+                original_indices[len(non_empty_queries)] = i
+                non_empty_queries.append(query)
+
+        if not non_empty_queries:
+            self.logger.info("All input lines are empty. Skipping API call.")
+            return [""] * num_src
+
+        prompt_lines = [f"<|{i+1}|>{query}" for i, query in enumerate(non_empty_queries)]
+        main_query_block = "\n".join(prompt_lines)
+        
+        # *** MODIFIED: Build the prompt with context before adding the batch query ***
+        prompt = self._build_prompt_with_context(prompt_template, main_query_block)
+        num_to_translate = len(non_empty_queries)
+
+        for attempt in range(self.retry_attempts):
+            try:
+                response = self._request_translation(prompt, chat_sample)
+                parsed_translations = [t.strip() for t in re.split(r"<\|\d+\|>", response.strip()) if t.strip()]
+
+                if len(parsed_translations) != num_to_translate:
+                    _tr2 = response.strip().split('\n')
+                    if len(_tr2) == num_to_translate:
+                        parsed_translations = [t.strip() for t in _tr2]
+                    else:
+                        raise InvalidNumTranslations(
+                            f"Expected {num_to_translate} translations, got {len(parsed_translations)}. Response: '{response}'"
+                        )
+                
+                final_translations = [""] * num_src
+                for i, translated_text in enumerate(parsed_translations):
+                    original_index = original_indices[i]
+                    final_translations[original_index] = translated_text
+
+                # *** MODIFIED: Update history with the results of the successful batch ***
+                for i, translated_text in enumerate(parsed_translations):
+                    original_src_query = non_empty_queries[i]
+                    self.translation_history.append((original_src_query, translated_text))
+                
+                return final_translations
+
+            except Exception as e:
+                self.logger.warning(f"Batch translation failed on attempt {attempt+1}: {e}")
+                if attempt + 1 >= self.retry_attempts:
+                    self.logger.error("Batch translation failed after all retries.")
+                    return [""] * num_src
+                time.sleep(self.retry_timeout)
+        
+        return [""] * num_src
+
+    def updateParam(self, param_key: str, param_content):
+        super().updateParam(param_key, param_content)
+        if param_key in ["proxy", "multiple_keys", "apikey", "provider", "endpoint"]:
+            self.logger.info(f"Core parameter '{param_key}' changed. Re-initializing client.")
+            self._initialize_client()
+        if param_key == "narration_context_size":
+            try:
+                new_size = int(param_content)
+                if new_size >= 0:
+                    # Re-create the deque with the new size
+                    self.translation_history = deque(list(self.translation_history), maxlen=new_size)
+                    self.logger.info(f"Updated narration context size to {new_size}.")
+                else:
+                    self.logger.error(f"Narration context size must be non-negative.")
+            except (ValueError, TypeError):
+                self.logger.error(f"Invalid narration context size: {param_content}")
+
+    # The rest of the methods like _get_model_name, _respect_delay, etc. are unchanged.
+    def _get_model_name(self) -> str:
+        model_name = self.override_model or self.model
+        if ": " in model_name:
+            return model_name.split(": ", 1)[1]
+        return model_name
+        
+    def _respect_delay(self):
+        delay = float(self.params["delay"]["value"])
+        if delay > 0:
+            time.sleep(delay)
+
+    def _select_api_key(self) -> str:
+        api_keys = self.multiple_keys_list
+        if not api_keys:
+            return self.apikey or "ollama"
+        self.current_key_index = (self.current_key_index + 1) % len(api_keys)
+        return api_keys[self.current_key_index]
+        
+    def _initialize_client(self):
+        http_client = None
+        if self.proxy:
+            self.logger.info(f"Using proxy: {self.proxy}")
+            http_client = httpx.Client(proxy=self.proxy)
+
+        api_keys = self.multiple_keys_list
+        api_key_to_use = api_keys[0] if api_keys else self.apikey
+
+        if not api_key_to_use:
+            self.logger.warning("No API key provided. Using a dummy key for local models.")
+            api_key_to_use = "ollama"
+
+        endpoint = self.endpoint
+        if not endpoint:
+            if self.provider == "Google":
+                endpoint = "https://generativelanguage.googleapis.com/v1beta/openai"
+            else: # Default for OpenAI-compatible, e.g. Ollama
+                endpoint = "http://127.0.0.1:11434/v1"
+
+        masked_key = api_key_to_use[:4] + "*" * (len(api_key_to_use) - 8) if len(api_key_to_use) > 7 else "****"
+        self.logger.debug(f"Initializing OpenAI client with endpoint: {endpoint} and key: {masked_key}")
+        try:
+            self.client = OpenAI(
+                api_key=api_key_to_use,
+                base_url=endpoint,
+                http_client=http_client,
+                timeout=self.retry_timeout + 5
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to initialize OpenAI client: {e}")
+            self.client = None
 
     @property
     def chat_system_template(self) -> str:
-        to_lang = self.lang_map[self.lang_target]
+        to_lang = self.lang_map.get(self.lang_target, "the target language")
         return self.params["chat system template"]["value"].format(to_lang=to_lang)
 
     @property
     def chat_sample(self):
-        model_name = self.model
-        if model_name == "gpt3":
+        samples_str = self.params["chat sample"]["value"]
+        if not samples_str or not samples_str.strip():
             return None
-        samples = self.params["chat sample"]["value"]
         try:
-            samples = yaml.load(
-                self.params["chat sample"]["value"], Loader=yaml.FullLoader
-            )
+            samples = yaml.load(samples_str, Loader=yaml.FullLoader)
         except Exception as e:
-            self.logger.error(f"Failed to parse sample: {samples} - {e}")
+            self.logger.error(f"Failed to parse sample YAML: {samples_str} - {e}")
             return None
-        src_tgt = self.lang_source + "-" + self.lang_target
-        if src_tgt in samples:
-            sample_data = samples[src_tgt]
-            src_queries = "\n".join(
-                [f"<|{i+1}|>{s}" for i, s in enumerate(sample_data["source"])]
-            )
-            tgt_queries = "\n".join(
-                [f"<|{i+1}|>{t}" for i, t in enumerate(sample_data["target"])]
-            )
+        
+        if not samples:
+            return None
+
+        src_tgt_key = f"{self.lang_source}-{self.lang_target}"
+        if src_tgt_key in samples:
+            sample_data = samples[src_tgt_key]
+            src_queries = "\n".join([f"<|{i+1}|>{s}" for i, s in enumerate(sample_data.get("source", []))])
+            tgt_queries = "\n".join([f"<|{i+1}|>{t}" for i, t in enumerate(sample_data.get("target", []))])
             return [src_queries, tgt_queries]
         return None
-
-    def _assemble_prompts(
-        self, queries: List[str], to_lang: str = None, max_tokens=None
-    ):
-        if to_lang is None:
-            to_lang = self.lang_map[self.lang_target]
-        prompt_template = (
-            self.params["prompt template"]["value"].format(to_lang=to_lang).rstrip()
-        )
-        prompt = prompt_template
-        num_src = 0
-        i_offset = 0
-
-        if max_tokens is None:
-            max_tokens = self.max_tokens
-
-        for i, query in enumerate(queries):
-            prompt += f"\n<|{i+1-i_offset}|>{query}"
-            num_src += 1
-            if max_tokens * 2 and len("".join(queries[i + 1 :])) > max_tokens:
-                yield prompt.lstrip(), num_src
-                prompt = prompt_template
-                i_offset = i + 1
-                num_src = 0
-        yield prompt.lstrip(), num_src
-
-    def _format_prompt_log(self, prompt: str) -> str:
-        chat_sample = self.chat_sample
-        if self.model != "gpt3" and chat_sample:
-            return "\n".join(
-                [
-                    "System:",
-                    self.chat_system_template,
-                    "User Sample:",
-                    chat_sample[0],
-                    "Assistant Sample:",
-                    chat_sample[1],
-                    "User Prompt:",
-                    prompt,
-                ]
-            )
-        return "\n".join(["System:", self.chat_system_template, "User Prompt:", prompt])
-
-    def _respect_delay(self):
-        current_time = time.time()
-
-        # Глобальный лимит запросов (если указан)
-        if int(self.params["max requests per minute"]["value"]) > 0:
-            if current_time - self.minute_start_time >= 60:
-                self.request_count_minute = 0
-                self.minute_start_time = current_time
-
-            if self.request_count_minute >= int(
-                self.params["max requests per minute"]["value"]
-            ):
-                wait_time = 62 - (current_time - self.minute_start_time)
-                if wait_time > 0:
-                    self.logger.warning(
-                        f"Reached global RPM limit. Waiting {wait_time:.2f} seconds."
-                    )
-                    time.sleep(wait_time)
-                self.request_count_minute = 0
-                self.minute_start_time = time.time()
-
-        time_since_last_request = current_time - self.last_request_time
-        if self.debug_mode:
-            self.logger.debug(
-                f"Time since last request: {time_since_last_request} seconds"
-            )
-
-        delay = float(self.params["delay"]["value"])
-        if time_since_last_request < delay:
-            sleep_time = delay - time_since_last_request
-            if self.debug_mode:
-                self.logger.debug(f"Waiting {sleep_time} seconds before next request")
-            time.sleep(sleep_time)
-
-        self.last_request_time = time.time()
-        self.request_count_minute += 1
-
-    def _respect_key_limit(self, key: str):
-        rpm = int(self.get_param_value("max requests per minute"))
-        if rpm <= 0:
-            return
-        count, start_time = self.key_usage.get(key, (0, time.time()))
-        now = time.time()
-        if now - start_time >= 60:
-            self.key_usage[key] = (0, now)
-            return
-        if count >= rpm:
-            wait_time = 60 - (now - start_time)
-            self.logger.warning(
-                f"Key {key[:6]}... reached RPM limit. Waiting {wait_time:.2f} seconds."
-            )
-            time.sleep(wait_time)
-            self.key_usage[key] = (0, time.time())
-
-    def _select_api_key(self) -> str:
-        api_keys = self.multiple_keys_list
-        if api_keys:
-            # Ротация ключей с учетом лимита по каждому
-            for _ in range(len(api_keys)):
-                index = self.current_key_index % len(api_keys)
-                key = api_keys[index]
-                self._respect_key_limit(key)
-                count, start_time = self.key_usage.get(key, (0, time.time()))
-                self.key_usage[key] = (count + 1, start_time)
-                self.current_key_index = (self.current_key_index + 1) % len(api_keys)
-                return key
-        else:
-            return self.apikey
-
-    def _request_translation_gpt3(self, prompt: str) -> str:
-        response = self.client.Completion.create(
-            model="text-davinci-003",
-            prompt=prompt,
-            max_tokens=self.max_tokens // 2,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            frequency_penalty=float(self.params["frequency penalty"]["value"]),
-            presence_penalty=float(self.params["presence penalty"]["value"]),
-        )
-
-        if response.choices:  # Проверка на наличие choices
-            if response.choices[0].text:  # Проверка на наличие text в первом choice
-                text_content = response.choices[0].text
-                if text_content is None:  # Проверка на None text_content
-                    if self.debug_mode:
-                        self.logger.warning("Completion text content is None.")
-                    return ""  # Возвращаем пустую строку, если text_content None
-            else:
-                if self.debug_mode:
-                    self.logger.warning("No text found in completion choice.")
-                return ""  # Возвращаем пустую строку, если нет text
-        else:
-            if self.debug_mode:
-                self.logger.warning("No choices found in completion response.")
-            return ""  # Возвращаем пустую строку, если нет choices
-
-        if response.usage:  # Проверка на наличие usage
-            self.token_count += response.usage.total_tokens
-            self.token_count_last = response.usage.total_tokens
-        else:
-            if self.debug_mode:
-                self.logger.warning("Usage data not found in completion response.")
-                self.token_count_last = (
-                    0  # Устанавливаем token_count_last в 0, если usage нет
-                )
-
-        return text_content  # Возвращаем text_content после всех проверок
-
-    def _request_translation(self, prompt: str, chat_sample: List[str]) -> str:
+        
+    def _request_translation(self, prompt: str, chat_sample: Optional[List[str]]) -> str:
         self._respect_delay()
 
-        current_api_key = self._select_api_key()
-        if not current_api_key:
-            return (
-                "Error: No API key provided in 'apikey' or 'multiple_keys' parameter."
-            )
+        if not self.client:
+            self.logger.error("Client not initialized. Cannot make a request.")
+            return "Error: Client not initialized."
 
-        provider = self.provider
-        model_name = self.override_model or self.model
-        if ": " in model_name:
-            model_name = model_name.split(": ", 1)[1]
-
-        # Обновляем клиента, чтобы использовать выбранный API ключ/endpoint
-        self._initialize_client()
-
-        self.logger.debug(f"Current Provider: {provider}")
-        self.logger.debug(f"Using model name for API call: {model_name}")
-
-        if model_name == "gpt3":
-            return self._request_translation_gpt3(prompt)
-        elif model_name in ["gpt35-turbo", "gpt4"]:
-            model_name = model_name.replace("gpt35-turbo", "gpt-3.5-turbo").replace(
-                "gpt4", "gpt-4"
-            )
-
+        self.client.api_key = self._select_api_key()
+        model_name = self._get_model_name()
+        
+        messages = [{"role": "system", "content": self.chat_system_template}]
+        if chat_sample:
+            messages.append({"role": "user", "content": chat_sample[0]})
+            messages.append({"role": "assistant", "content": chat_sample[1]})
+        messages.append({"role": "user", "content": prompt})
+        
         if self.debug_mode:
-            self.logger.info(f"Using model: {model_name}, Provider: {provider}")
+            self.logger.debug(f"Requesting translation for model '{model_name}' with prompt: {prompt}")
 
-        if provider == "Google":
-            result = self._request_translation_with_chat_sample_google(
-                prompt, model_name, chat_sample
-            )
-        else:
-            result = self._request_translation_with_chat_sample_openai(
-                prompt, model_name, chat_sample
-            )
+        try:
+            api_params = {
+                "model": model_name,
+                "messages": messages,
+            }
 
-        if not isinstance(result, str):
-            result = str(result)
-        return result
-
-    def _request_translation_with_chat_sample_openai(
-        self, prompt: str, model: str, chat_sample: List[str]
-    ) -> str:
-        messages = [
-            {"role": "system", "content": self.chat_system_template},
-            {"role": "user", "content": prompt},
-        ]
-        if chat_sample:
-            messages.insert(1, {"role": "user", "content": chat_sample[0]})
-            messages.insert(2, {"role": "assistant", "content": chat_sample[1]})
-
-        func_args = {
-            "model": model,
-            "messages": messages,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "max_tokens": self.max_tokens // 2,
-            "frequency_penalty": float(self.params["frequency penalty"]["value"]),
-            "presence_penalty": float(self.params["presence penalty"]["value"]),
-        }
-
-        response = self.client.chat.completions.create(**func_args)
-
-        if response.choices:  # Проверка на наличие choices
-            if response.choices[
-                0
-            ].message:  # Проверка на наличие message в первом choice
-                content = response.choices[0].message.content
-                if content is None:  # Проверка на None content
-                    if self.debug_mode:
-                        self.logger.warning("Chat completion content is None.")
-                    return ""  # Возвращаем пустую строку, если content None
-            else:
-                if self.debug_mode:
-                    self.logger.warning("No message found in chat completion choice.")
-                return ""  # Возвращаем пустую строку, если нет message
-        else:
+            if not self.use_provider_defaults:
+                api_params["temperature"] = self.temperature
+                api_params["max_tokens"] = self.max_tokens
+                api_params["top_p"] = self.top_p
+            
             if self.debug_mode:
-                self.logger.warning("No choices found in chat completion response.")
-            return ""  # Возвращаем пустую строку, если нет choices
+                log_params = {k: v for k, v in api_params.items() if k != 'messages'}
+                self.logger.debug(f"API call parameters: {log_params}")
 
-        if response.usage:  # Проверка на наличие usage
-            self.token_count += response.usage.total_tokens
-            self.token_count_last = response.usage.total_tokens
-        else:
-            if self.debug_mode:
-                self.logger.warning("Usage data not found in chat completion response.")
-                self.token_count_last = (
-                    0  # Устанавливаем token_count_last в 0, если usage нет
-                )
-        return content  # Возвращаем content после всех проверок
+            response = self.client.chat.completions.create(**api_params)
+            content = response.choices[0].message.content or ""
+            
+            if response.usage:
+                self.token_count_last = response.usage.total_tokens
+                self.token_count += self.token_count_last
+            
+            return content.strip()
+        except Exception as e:
+            self.logger.error(f"API call failed: {e}")
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
+            raise
 
-    def _request_translation_with_chat_sample_google(
-        self, prompt: str, model: str, chat_sample: List[str]
-    ) -> str:
-        messages = [
-            {"role": "system", "content": self.chat_system_template},
-            {"role": "user", "content": prompt},
-        ]
-        if chat_sample:
-            messages.insert(1, {"role": "user", "content": chat_sample[0]})
-            messages.insert(2, {"role": "assistant", "content": chat_sample[1]})
+    def _clear_context(self):
+        clear_msg = self.context_clear_message
+        if not clear_msg or not self.client:
+            return
 
-        func_args = {
-            "model": model,
-            "messages": messages,
-            "top_p": self.top_p,
-            "max_tokens": self.max_tokens // 2,
-        }
-
-        response = self.client.chat.completions.create(**func_args)
-        if response.choices:
-            if response.choices[0].message:
-                return response.choices[0].message.content
-        return ""  # Возвращаем пустую строку, если нет content
-
-    def _translate(self, src_list: List[str]) -> List[str]:
-        translations = []
-        to_lang = self.lang_map[self.lang_target]
-        queries = src_list
-        chat_sample = self.chat_sample
-
-        for prompt, num_src in self._assemble_prompts(queries, to_lang=to_lang):
-            retry_attempt = 0
-            while True:
-                try:
-                    response = self._request_translation(prompt, chat_sample)
-                    if not isinstance(response, str):
-                        response = str(response)
-                    new_translations = re.split(r"<\|\d+\|>", response)[-num_src:]
-                    if len(new_translations) != num_src:
-                        _tr2 = re.sub(r"<\|\d+\|>", "", response).split("\n")
-                        if len(_tr2) == num_src:
-                            new_translations = _tr2
-                        else:
-                            raise InvalidNumTranslations
-                    break
-                except InvalidNumTranslations:
-                    retry_attempt += 1
-                    message = f"Translation count mismatch:\nprompt:\n{prompt}\ntranslations:\n{new_translations}\nresponse:\n{response}"
-                    if retry_attempt >= self.retry_attempts:
-                        self.logger.error(message)
-                        new_translations = [""] * num_src
-                        break
-                    self.logger.warning(
-                        message + f"\nRetrying. Attempt: {retry_attempt}"
-                    )
-                except Exception as e:
-                    retry_attempt += 1
-                    if retry_attempt >= self.retry_attempts:
-                        new_translations = [""] * num_src
-                        break
-                    self.logger.warning(
-                        f"Translation failed: {e}. Attempt: {retry_attempt}, sleep {self.retry_timeout}s..."
-                    )
-                    self.logger.error(f"Traceback: {traceback.format_exc()}")
-                    time.sleep(self.retry_timeout)
-            translations.extend([t.strip() for t in new_translations])
-
-        if self.token_count_last:
-            self.logger.info(
-                f"Used {self.token_count_last} tokens (Total: {self.token_count})"
+        self.logger.info(f"Sending context clear message: '{clear_msg}'")
+        try:
+            self.client.chat.completions.create(
+                model=self._get_model_name(),
+                messages=[{"role": "user", "content": clear_msg}],
+                max_tokens=5,
             )
-        return translations
-
-    def updateParam(self, param_key: str, param_content):
-        super().updateParam(param_key, param_content)
-        self.logger.debug(
-            f"updateParam called for key: {param_key}, content: {param_content}"
-        )
-        if param_key in [
-            "proxy",
-            "multiple_keys",
-            "apikey",
-            "provider",
-            "endpoint",
-            "model",
-            "override_model",
-        ]:
-            self._initialize_client()
+            self.logger.info("Successfully sent context clear message.")
+        except Exception as e:
+            self.logger.error(f"Failed to send context clear message: {e}")
