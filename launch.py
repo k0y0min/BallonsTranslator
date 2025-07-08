@@ -46,6 +46,8 @@ parser.add_argument("--export-source-txt", action='store_true', help='save sourc
 parser.add_argument("--frozen", action='store_true', help='run without checking requirements')
 parser.add_argument("--update", action='store_true', help="Update the repository before launching") # Добавлен аргумент --update
 parser.add_argument("--config_path", default=shared.CONFIG_PATH, help='Config file to use for translation') # Named config_path to avoid conflict with existing name config
+# New argument for orientation
+parser.add_argument("--orientation", default='Auto-Detect', choices=['Auto-Detect', 'Force Vertical', 'Force Horizontal'], help='Force text orientation for detection.')
 args, _ = parser.parse_known_args()
 
 
@@ -175,6 +177,16 @@ def main():
     shared.load_cache()
     program_config.load_config(args.config_path)
     config = program_config.pcfg
+
+    # Apply orientation override from command line
+    if args.headless and args.orientation:
+        detector_name = config.module.textdetector
+        if detector_name not in config.module.textdetector_params:
+            config.module.textdetector_params[detector_name] = {}
+        if 'orientation' not in config.module.textdetector_params[detector_name]:
+             config.module.textdetector_params[detector_name]['orientation'] = {}
+        config.module.textdetector_params[detector_name]['orientation']['value'] = args.orientation
+        LOGGER.info(f"Headless mode: Forcing text orientation to '{args.orientation}' for detector '{detector_name}'.")
 
     if args.headless:
         config.module.load_model_on_demand = True
