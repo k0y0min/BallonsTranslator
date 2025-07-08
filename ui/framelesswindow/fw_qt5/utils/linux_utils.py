@@ -155,3 +155,12 @@ class LinuxMoveResize:
             Qt.RightEdge: WindowMessage._NET_WM_MOVERESIZE_SIZE_RIGHT,
         }
         cls.startSystemMoveResize(window, globalPos, messageMap[edges].value)
+
+
+    @classmethod
+    def toggleMaxState(cls, window):
+        """ Toggles the maximized state of the window. """
+        if window.isMaximized():
+            window.showNormal()
+        else:
+            window.showMaximized()
