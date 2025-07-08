@@ -21,7 +21,13 @@ class ComicTextDetector(TextDetectorBase):
             'type': 'selector',
             'options': [896, 1024, 1152, 1280], 
             'value': 1024
-        }, 
+        },
+        'orientation': {
+            'type': 'selector',
+            'options': ['Auto-Detect', 'Force Vertical', 'Force Horizontal'],
+            'value': 'Auto-Detect',
+            'description': 'Force text orientation for all detected blocks.'
+        },
         'det_rearrange_max_batches': {
             'type': 'selector',
             'options': [1, 2, 4, 6, 8, 12, 16, 24, 32], 
@@ -65,6 +71,17 @@ class ComicTextDetector(TextDetectorBase):
     def _detect(self, img: np.ndarray, proj: ProjImgTrans) -> Tuple[np.ndarray, List[TextBlock]]:
         _, mask, blk_list = self.model(img)
         
+        # Apply orientation override
+        orientation_mode = self.get_param_value('orientation')
+        if orientation_mode == 'Force Vertical':
+            for blk in blk_list:
+                blk.vertical = True
+                blk.src_is_vertical = True
+        elif orientation_mode == 'Force Horizontal':
+            for blk in blk_list:
+                blk.vertical = False
+                blk.src_is_vertical = False
+
         fnt_rsz = self.get_param_value('font size multiplier')
         fnt_max = self.get_param_value('font size max')
         fnt_min = self.get_param_value('font size min')
