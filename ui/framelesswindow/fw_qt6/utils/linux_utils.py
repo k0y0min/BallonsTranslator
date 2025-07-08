@@ -25,3 +25,11 @@ class LinuxMoveResize:
             window edges
         """
         window.windowHandle().startSystemResize(edges)
+
+    @classmethod
+    def toggleMaxState(cls, window):
+        """ Toggles the maximized state of the window. """
+        if window.isMaximized():
+            window.showNormal()
+        else:
+            window.showMaximized()
